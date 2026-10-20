@@ -1,0 +1,116 @@
+name: VulnIntel Scan
+description: Upload a lockfile or SBOM to VulnIntel and gate the build on the verdict (application dependencies only).
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  api-key:
+    description: VulnIntel API key (sent as X-Api-Key). Required; missing key exits 4.
+    required: true
+  api-url:
+    description: API base URL.
+    default: https://api.vulnintelapp.com/api/v1
+  path:
+    description: Root directory for lockfile/SBOM discovery.
+    default: "."
+  file:
+    description: Upload exactly this file and skip discovery and syft.
+    default: ""
+  syft:
+    description: "auto (use syft if on PATH) or off (lockfile discovery only)."
+    default: auto
+  scan-depth:
+    description: basic or precise.
+    default: basic
+  fail-on:
+    description: "policy or never. never turns exit 1/2 into 0 + warning; exit 4 is never suppressed."
+    default: policy
+  fail-on-kev:
+    description: Fail when any vulnerability is in CISA KEV.
+    default: "true"
+  max-cvss:
+    description: Fail when any vulnerability has CVSS >= this score. Empty disables the rule.
+    default: "9.0"
+  max-critical:
+    description: Max allowed CRITICAL vulnerabilities. Empty disables the rule.
+    default: "0"
+  max-high:
+    description: Max allowed HIGH vulnerabilities. Empty disables the rule.
+    default: ""
+  max-unknown:
+    description: Max allowed UNKNOWN-severity vulnerabilities. Empty disables the rule.
+    default: ""
+  ignore:
+    description: Comma/newline separated CVE or GHSA IDs to ignore (max 500).
+    default: ""
+  policy-json:
+    description: Full policy JSON sent verbatim. When set, all flat policy inputs are ignored.
+    default: ""
+  unsupported-ratio-threshold:
+    description: Exit 2 when the share of packages in unsupported ecosystems exceeds this. 1.0 disables.
+    default: "0.20"
+  no-cache:
+    description: Ask the server to bypass its 24h result cache.
+    default: "false"
+  timeout:
+    description: Total seconds from upload to verdict (minimum 310).
+    default: "360"
+  sbom-output:
+    description: If set, save the CycloneDX SBOM of the job to this path.
+    default: ""
+
+outputs:
+  job-id:
+    description: Scan job UUID.
+    value: ${{ steps.scan.outputs.job-id }}
+  passed:
+    description: result.policy.passed (true/false).
+    value: ${{ steps.scan.outputs.passed }}
+  verdict:
+    description: pass / policy_failed / indeterminate / service_error / usage_error (before fail-on suppression).
+    value: ${{ steps.scan.outputs.verdict }}
+  total-packages:
+    description: result.summary.total_packages.
+    value: ${{ steps.scan.outputs.total-packages }}
+  total-vulnerabilities:
+    description: result.summary.total_vulnerabilities.
+    value: ${{ steps.scan.outputs.total-vulnerabilities }}
+  kev-count:
+    description: result.summary.kev_count.
+    value: ${{ steps.scan.outputs.kev-count }}
+  unsupported-ratio:
+    description: Unsupported packages / total packages (3 decimals).
+    value: ${{ steps.scan.outputs.unsupported-ratio }}
+  data-freshness:
+    description: result.data_freshness.internal_db_synced_at (ISO 8601).
+    value: ${{ steps.scan.outputs.data-freshness }}
+
+runs:
+  using: composite
+  steps:
+    - id: scan
+      shell: bash
+      # Composite actions do not export INPUT_* automatically, so map them explicitly.
+      env:
+        INPUT_API_KEY: ${{ inputs.api-key }}
+        INPUT_API_URL: ${{ inputs.api-url }}
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_FILE: ${{ inputs.file }}
+        INPUT_SYFT: ${{ inputs.syft }}
+        INPUT_SCAN_DEPTH: ${{ inputs.scan-depth }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_FAIL_ON_KEV: ${{ inputs.fail-on-kev }}
+        INPUT_MAX_CVSS: ${{ inputs.max-cvss }}
+        INPUT_MAX_CRITICAL: ${{ inputs.max-critical }}
+        INPUT_MAX_HIGH: ${{ inputs.max-high }}
+        INPUT_MAX_UNKNOWN: ${{ inputs.max-unknown }}
+        INPUT_IGNORE: ${{ inputs.ignore }}
+        INPUT_POLICY_JSON: ${{ inputs.policy-json }}
+        INPUT_UNSUPPORTED_RATIO_THRESHOLD: ${{ inputs.unsupported-ratio-threshold }}
+        INPUT_NO_CACHE: ${{ inputs.no-cache }}
+        INPUT_TIMEOUT: ${{ inputs.timeout }}
+        INPUT_SBOM_OUTPUT: ${{ inputs.sbom-output }}
+      run: |
+        PY="$(command -v python3 || command -v python)"
+        "$PY" "$GITHUB_ACTION_PATH/vulnintel_scan.py"
