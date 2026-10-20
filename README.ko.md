@@ -53,7 +53,7 @@ URL의 `v1`은 움직이는 태그다. 운영 파이프라인에서는 릴리스
 | `max-cvss` | `9.0` | `{type: cvss_threshold, min_score: <값>, max_count: 0, action: fail}`. 빈값이면 규칙 없음. CVSS가 없는 취약점은 이 규칙에 걸리지 않는다. |
 | `max-critical` | `0` | `{type: severity_threshold, severity: CRITICAL, max_count: <값>, action: fail}`. CVSS 없는 CRITICAL을 막는다. 빈값이면 규칙 없음. |
 | `max-high` | 빈값 | 위와 같음, `HIGH`. |
-| `max-unknown` | 빈값 | 위와 같음, `UNKNOWN`(심각도 미상). 아래 "미확정 판정"(영향 여부 미상)과 다른 개념이다. |
+| `max-unknown` | 빈값 | 위와 같음, `UNKNOWN`(심각도 미상). 아래 "미확정 게이트"(영향 여부 미상)와 다른 개념이다. |
 | `ignore` | 빈값 | 콤마/공백/개행 구분 `CVE-YYYY-NNNN`·`GHSA-xxxx-xxxx-xxxx` → `{type: ignore_list, cve_ids: [...]}`. 형식 위반·500개 초과는 전송 전에 `exit 4`. |
 | `policy-json` | 빈값 | 정책 JSON을 그대로 전송. 설정 시 위 정책 키 전부 무시(경고 1줄). |
 | `unsupported-ratio-threshold` | `0.20` | 커버리지 게이트. 초과 시 `exit 2`. `1.0`이면 사실상 비활성. |
@@ -80,7 +80,18 @@ URL의 `v1`은 움직이는 태그다. 운영 파이프라인에서는 릴리스
 | `data-freshness` | `result.data_freshness.internal_db_synced_at` |
 
 출력은 `$GITHUB_OUTPUT`이 있을 때만 기록한다. 콘솔에는 DB 동기 시각, 캐시 적중 여부, 심각도별 건수(`UNKNOWN` 포함), 미확정 취약점 수,
-`warnings` 전문, 위반 규칙별 `rule`·`count`·`samples`를 출력하고, `$GITHUB_STEP_SUMMARY`가 있으면 같은 내용을 1회 append한다.
+`warnings` 전문, 위반 규칙별 `rule`·`count`·`samples`, 정책 위반 시 업그레이드 안내를 출력하고, `$GITHUB_STEP_SUMMARY`가 있으면 같은 내용을 1회 append한다.
+
+업그레이드 안내는 보낸 정책의 `fail` 규칙을 위반한 취약점을 패키지별로 묶어 한 줄씩 출력한다(`samples`는 규칙당 최대 5개라 클라이언트가 `result.packages`에 규칙을 다시 적용한다).
+권장 버전은 그 취약점들의 수정 버전 중 최댓값이며, 모든 값이 점으로 구분된 숫자일 때만 숫자로 비교하고 아니면 ID별 수정 버전을 나열한다.
+수정 버전이 없는 취약점은 `no fixed version yet`로 표시한다. 최대 20개 패키지까지 출력하고 나머지는 `... and N more package(s)`로 줄인다. 이 필드가 없는 결과는 안내를 출력하지 않는다.
+
+```text
+Policy: FAILED
+  - rule=cvss_threshold count=3 samples=CVE-2025-64459, CVE-2024-53908, CVE-2026-4277
+Fix by upgrading:
+  django 4.2.16 → upgrade to >= 4.2.30 (CVE-2024-53908, CVE-2025-64459, CVE-2026-4277)
+```
 
 ## exit code
 
@@ -110,6 +121,18 @@ URL의 `v1`은 움직이는 태그다. 운영 파이프라인에서는 릴리스
 | `policy` (기본) | 1 | 2 | 0 + 경고 | 4 |
 | `never` | 0 + 경고 | 0 + 경고 | 0 + 경고 | 4 |
 
+`fail-on: policy`에서도 exit 3을 0으로 바꾸는 것은 의도된 동작이다. VulnIntel 장애로 고객의 빌드·배포를 막지 않으며(fail-open), 판정이 없다는 사실은 경고와 `verdict` 출력(`service_error`)으로 남는다.
+VulnIntel에 도달하지 못했을 때 job을 실패시키려면 다음 스텝에서 `steps.<id>.outputs.verdict == 'service_error'`를 검사한다:
+
+```yaml
+- uses: vulnintel/scan-action@v1
+  id: vulnintel
+  with:
+    api-key: ${{ secrets.VULNINTEL_API_KEY }}
+- if: steps.vulnintel.outputs.verdict == 'service_error'
+  run: exit 1
+```
+
 ## 사용하는 엔드포인트
 
 모든 요청에 `X-Api-Key: <키>`, `User-Agent: vulnintel-scan-action/<버전>`을 보낸다.
@@ -138,6 +161,7 @@ URL의 `v1`은 움직이는 태그다. 운영 파이프라인에서는 릴리스
 네트워크 오류·5xx는 다음 주기로 넘기고 연속 5회면 `exit 3`. `429`는 `Retry-After`만큼 대기. `failed`면 `error.code`·`error.message`를 출력하고 `exit 2`.
 판정에 쓰는 필드: `result.summary.{total_packages, total_vulnerabilities, kev_count, by_severity, unsupported_packages, unknown_vulnerabilities}`,
 `result.policy.{passed, violations[].{rule, count, samples}}`, `result.warnings[]`, `result.data_freshness.internal_db_synced_at`.
+업그레이드 안내에 쓰는 필드: `result.packages[].{purl, name, version, vulnerabilities[].{id, aliases, kev, severity, cvss.score, fixed_versions}}`.
 
 ### `GET /scan/jobs/{job_id}/sbom`
 

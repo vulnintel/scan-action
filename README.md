@@ -53,7 +53,7 @@ An environment variable or argument whose value is an empty string is treated as
 | `max-cvss` | `9.0` | `{type: cvss_threshold, min_score: <value>, max_count: 0, action: fail}`. Empty means no rule. Vulnerabilities without a CVSS score are not caught by this rule. |
 | `max-critical` | `0` | `{type: severity_threshold, severity: CRITICAL, max_count: <value>, action: fail}`. Catches CRITICAL findings without a CVSS score. Empty means no rule. |
 | `max-high` | empty | Same as above, for `HIGH`. |
-| `max-unknown` | empty | Same as above, for `UNKNOWN` (severity unknown). Not the same as "unresolved" (impact unknown) described below. |
+| `max-unknown` | empty | Same as above, for `UNKNOWN` (severity unknown). Not the same as "unresolved" (impact unknown) in the **Unresolved gate** below. |
 | `ignore` | empty | `CVE-YYYY-NNNN` / `GHSA-xxxx-xxxx-xxxx` separated by commas, spaces, or newlines → `{type: ignore_list, cve_ids: [...]}`. Invalid format or more than 500 entries → `exit 4` before sending. |
 | `policy-json` | empty | Sends the policy JSON as is. When set, all policy keys above are ignored (one-line warning). |
 | `unsupported-ratio-threshold` | `0.20` | Coverage gate. If exceeded, `exit 2`. `1.0` effectively disables it. |
@@ -80,7 +80,18 @@ Auto-discovery targets (files the server parsers read): `package-lock.json`, `go
 | `data-freshness` | `result.data_freshness.internal_db_synced_at` |
 
 Outputs are written only when `$GITHUB_OUTPUT` exists. The console shows the DB sync time, cache hit status, counts by severity (including `UNKNOWN`), the number of unresolved vulnerabilities,
-the full `warnings`, and `rule` / `count` / `samples` for each violated rule. If `$GITHUB_STEP_SUMMARY` exists, the same content is appended to it once.
+the full `warnings`, `rule` / `count` / `samples` for each violated rule, and, when the policy fails, an upgrade guide. If `$GITHUB_STEP_SUMMARY` exists, the same content is appended to it once.
+
+The upgrade guide prints one line per package for the vulnerabilities that violate a `fail` rule of the policy you sent (`samples` holds at most 5 IDs per rule, so the client re-applies the rules to `result.packages`).
+The suggested version is the highest fixed version among those vulnerabilities, compared as numbers only when every value is dot-separated digits; otherwise the fixed version is listed per ID.
+Vulnerabilities without a fixed version are shown as `no fixed version yet`. At most 20 packages are listed, then `... and N more package(s)`. Results without these fields print no guide.
+
+```text
+Policy: FAILED
+  - rule=cvss_threshold count=3 samples=CVE-2025-64459, CVE-2024-53908, CVE-2026-4277
+Fix by upgrading:
+  django 4.2.16 → upgrade to >= 4.2.30 (CVE-2024-53908, CVE-2025-64459, CVE-2026-4277)
+```
 
 ## Exit codes
 
@@ -110,6 +121,18 @@ After review, adding them to `ignore` clears the gate. Results without this fiel
 | `policy` (default) | 1 | 2 | 0 + warning | 4 |
 | `never` | 0 + warning | 0 + warning | 0 + warning | 4 |
 
+Exit 3 becomes 0 even with `fail-on: policy` on purpose: a VulnIntel outage does not block your build or deploy (fail-open), and the missing verdict is still recorded as a warning and as the `verdict` output (`service_error`).
+To fail the job when VulnIntel is unreachable, check `steps.<id>.outputs.verdict == 'service_error'` in the next step:
+
+```yaml
+- uses: vulnintel/scan-action@v1
+  id: vulnintel
+  with:
+    api-key: ${{ secrets.VULNINTEL_API_KEY }}
+- if: steps.vulnintel.outputs.verdict == 'service_error'
+  run: exit 1
+```
+
 ## Endpoints used
 
 Every request sends `X-Api-Key: <key>` and `User-Agent: vulnintel-scan-action/<version>`.
@@ -138,6 +161,7 @@ Polls every 3 seconds. Stops when `status` becomes `completed`/`failed`.
 Network errors and 5xx are deferred to the next cycle; 5 in a row → `exit 3`. On `429`, waits for `Retry-After`. On `failed`, prints `error.code` and `error.message` and returns `exit 2`.
 Fields used for the verdict: `result.summary.{total_packages, total_vulnerabilities, kev_count, by_severity, unsupported_packages, unknown_vulnerabilities}`,
 `result.policy.{passed, violations[].{rule, count, samples}}`, `result.warnings[]`, `result.data_freshness.internal_db_synced_at`.
+Fields used for the upgrade guide: `result.packages[].{purl, name, version, vulnerabilities[].{id, aliases, kev, severity, cvss.score, fixed_versions}}`.
 
 ### `GET /scan/jobs/{job_id}/sbom`
 

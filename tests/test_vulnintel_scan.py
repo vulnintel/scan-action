@@ -27,6 +27,7 @@ def _result(
     warnings: list[str] | None = None,
     violations: list[dict[str, Any]] | None = None,
     unknown: int | None = None,
+    packages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """완료 job 응답 바디를 만든다. unknown=None 이면 필드 없는 구 결과."""
     return {
@@ -44,7 +45,7 @@ def _result(
                 "unsupported_packages": unsupported,
                 **({} if unknown is None else {"unknown_vulnerabilities": unknown}),
             },
-            "packages": [],
+            "packages": packages or [],
             "policy": {"passed": passed, "violations": violations or []},
             "data_freshness": {"internal_db_synced_at": "2026-10-14T01:02:03+00:00"},
             "warnings": warnings or [],
@@ -368,6 +369,117 @@ def test_old_result_without_unknown_field_keeps_previous_behaviour(run, server):
     """구 캐시 결과(필드 없음)는 기존 판정 그대로."""
     server.routes = {POST: [ACCEPTED], GET: [_resp(200, _result(unknown=None))]}
     assert run()[0] == 0
+
+
+# ── 업그레이드 안내 ─────────────────────────────────────
+
+
+def _vuln(vid: str, fixed: list[str], score: float = 9.8, **extra: Any) -> dict:
+    """result.packages[].vulnerabilities 원소."""
+    sev = "CRITICAL" if score >= 9 else "HIGH" if score >= 7 else "MEDIUM"
+    return {
+        "id": vid,
+        "severity": sev,
+        "cvss": {"score": score},
+        "fixed_versions": fixed,
+        **extra,
+    }
+
+
+def _pkg(name: str, version: str | None, *vulns: dict) -> dict:
+    """result.packages 원소."""
+    return {
+        "purl": f"pkg:pypi/{name}@{version}",
+        "name": name,
+        "version": version,
+        "vulnerabilities": list(vulns),
+    }
+
+
+VIOL = [{"rule": "cvss_threshold", "count": 3, "samples": ["CVE-2025-64459"]}]
+
+
+def test_fix_lines_group_by_package_with_numeric_max(run, server, capsys, tmp_path):
+    """패키지별 한 줄, 수정 버전은 숫자 튜플 최댓값(문자열 비교면 4.2.9 가 이긴다)."""
+    django = _pkg(
+        "django",
+        "4.2.16",
+        _vuln("CVE-2026-4277", ["4.2.30"]),
+        _vuln("CVE-2024-53908", ["4.2.9"]),
+        _vuln("CVE-2025-64459", ["4.2.26"]),
+    )
+    low = _pkg("idna", "3.6", _vuln("CVE-2024-3651", ["3.7"], score=6.2))
+    body = _result(passed=False, violations=VIOL, packages=[django, low])
+    server.routes = {POST: [ACCEPTED], GET: [_resp(200, body)]}
+    assert run()[0] == 1
+    line = (
+        "  django 4.2.16 → upgrade to >= 4.2.30 "
+        "(CVE-2024-53908, CVE-2025-64459, CVE-2026-4277)"
+    )
+    text = capsys.readouterr().out
+    assert f"Fix by upgrading:\n{line}\n" in text
+    assert "idna" not in text  # 정책을 넘지 않은 취약점은 안내하지 않는다
+    assert line in (tmp_path / "gh_summary").read_text(encoding="utf-8")
+
+
+def test_fix_lines_no_fixed_version_and_non_numeric(run, server, capsys):
+    """수정 버전 없음은 `no fixed version yet`, 숫자가 아닌 버전은 CVE별로 나열한다."""
+    pkgs = [
+        _pkg("a", "1.0", _vuln("CVE-2024-0001", []), _vuln("CVE-2024-0002", ["1.1"])),
+        _pkg("b", None, _vuln("CVE-2024-0003", [])),
+        _pkg("c", "2.0", _vuln("CVE-2024-0004", ["2.1rc1"])),
+    ]
+    body = _result(passed=False, violations=VIOL, packages=pkgs)
+    server.routes = {POST: [ACCEPTED], GET: [_resp(200, body)]}
+    run()
+    text = capsys.readouterr().out
+    assert (
+        "  a 1.0 → upgrade to >= 1.1 (CVE-2024-0002); "
+        "no fixed version yet (CVE-2024-0001)"
+    ) in text
+    assert "  b (version unknown) → no fixed version yet (CVE-2024-0003)" in text
+    assert "  c 2.0 → CVE-2024-0004 fixed in 2.1rc1" in text
+
+
+def test_fix_lines_follow_sent_policy_rules_and_ignore(run, server, capsys):
+    """KEV·severity 규칙도 서버 평가와 같게, ignore 한 ID·한도 이하 규칙은 제외한다."""
+    pkgs = [
+        _pkg("kevpkg", "1.0", _vuln("CVE-2024-0010", ["1.2"], score=5.0, kev=True)),
+        _pkg("ignored", "1.0", _vuln("CVE-2024-0011", ["1.1"])),
+        _pkg("high", "1.0", _vuln("CVE-2024-0012", ["1.3"], score=7.5)),
+    ]
+    body = _result(passed=False, violations=VIOL, packages=pkgs)
+    server.routes = {POST: [ACCEPTED], GET: [_resp(200, body)]}
+    run("--max-high", "1", "--ignore", "CVE-2024-0011")
+    text = capsys.readouterr().out
+    assert "  kevpkg 1.0 → upgrade to >= 1.2 (CVE-2024-0010)" in text
+    assert "ignored 1.0 →" not in text and "high 1.0 →" not in text
+
+
+def test_fix_lines_are_capped(run, server, capsys):
+    pkgs = [
+        _pkg(f"p{i}", "1.0", _vuln(f"CVE-2024-{i:04d}", ["1.1"])) for i in range(25)
+    ]
+    body = _result(passed=False, violations=VIOL, packages=pkgs)
+    server.routes = {POST: [ACCEPTED], GET: [_resp(200, body)]}
+    run()
+    text = capsys.readouterr().out
+    assert text.count(" → upgrade to >= 1.1") == vs.MAX_FIX_PACKAGES
+    assert "  ... and 5 more package(s)" in text
+
+
+def test_old_result_without_fixed_versions_or_packages(run, server, capsys):
+    """필드 없는 구 응답 — 판정·출력은 기존 그대로, 안내만 빠지거나 `no fixed`."""
+    server.routes = {POST: [ACCEPTED], GET: [_resp(200, _result(passed=False))]}
+    del server.routes[GET][0][1]["result"]["packages"]
+    assert run()[0] == 1
+    assert "Fix by upgrading" not in capsys.readouterr().out
+    old = _pkg("django", "4.2.16", _vuln("CVE-2025-64459", []))
+    del old["vulnerabilities"][0]["fixed_versions"]
+    body = _result(passed=False, violations=VIOL, packages=[old])
+    server.routes = {POST: [ACCEPTED], GET: [_resp(200, body)]}
+    assert run()[0] == 1
+    assert "django 4.2.16 → no fixed version yet" in capsys.readouterr().out
 
 
 # ── 업로드 오류·재시도 ─────────────────────────────────────

@@ -53,7 +53,7 @@ URL 中的 `v1` 是移动标签。生产流水线中请固定到发布标签（`
 | `max-cvss` | `9.0` | `{type: cvss_threshold, min_score: <值>, max_count: 0, action: fail}`。空值表示不创建规则。没有 CVSS 的漏洞不会触发此规则。 |
 | `max-critical` | `0` | `{type: severity_threshold, severity: CRITICAL, max_count: <值>, action: fail}`。用于拦截没有 CVSS 的 CRITICAL。空值表示不创建规则。 |
 | `max-high` | 空值 | 同上，对应 `HIGH`。 |
-| `max-unknown` | 空值 | 同上，对应 `UNKNOWN`（严重程度未知）。与下文的“未确定判定”（是否受影响未知）是不同概念。 |
+| `max-unknown` | 空值 | 同上，对应 `UNKNOWN`（严重程度未知）。与下文的“未确定门禁”（是否受影响未知）是不同概念。 |
 | `ignore` | 空值 | 以逗号/空格/换行分隔的 `CVE-YYYY-NNNN`、`GHSA-xxxx-xxxx-xxxx` → `{type: ignore_list, cve_ids: [...]}`。格式错误或超过 500 个时，在发送前 `exit 4`。 |
 | `policy-json` | 空值 | 原样发送策略 JSON。设置后忽略上述所有策略键（输出 1 行警告）。 |
 | `unsupported-ratio-threshold` | `0.20` | 覆盖率门禁。超过时 `exit 2`。设为 `1.0` 实际上等于禁用。 |
@@ -80,7 +80,18 @@ URL 中的 `v1` 是移动标签。生产流水线中请固定到发布标签（`
 | `data-freshness` | `result.data_freshness.internal_db_synced_at` |
 
 仅当存在 `$GITHUB_OUTPUT` 时才写入输出。控制台会打印 DB 同步时间、是否命中缓存、按严重程度统计的数量（含 `UNKNOWN`）、未确定漏洞数、
-`warnings` 全文，以及每条违规规则的 `rule`、`count`、`samples`；如果存在 `$GITHUB_STEP_SUMMARY`，会将相同内容追加 1 次。
+`warnings` 全文、每条违规规则的 `rule`、`count`、`samples`，以及策略失败时的升级建议；如果存在 `$GITHUB_STEP_SUMMARY`，会将相同内容追加 1 次。
+
+升级建议按包分组，每行列出违反所发送策略中 `fail` 规则的漏洞（`samples` 每条规则最多 5 个 ID，因此客户端会对 `result.packages` 重新应用规则）。
+建议版本是这些漏洞修复版本中的最大值；仅当所有值都是以点分隔的数字时才按数字比较，否则按 ID 列出修复版本。
+没有修复版本的漏洞显示为 `no fixed version yet`。最多列出 20 个包，其余显示为 `... and N more package(s)`。没有这些字段的结果不输出升级建议。
+
+```text
+Policy: FAILED
+  - rule=cvss_threshold count=3 samples=CVE-2025-64459, CVE-2024-53908, CVE-2026-4277
+Fix by upgrading:
+  django 4.2.16 → upgrade to >= 4.2.30 (CVE-2024-53908, CVE-2025-64459, CVE-2026-4277)
+```
 
 ## 退出码
 
@@ -110,6 +121,18 @@ URL 中的 `v1` 是移动标签。生产流水线中请固定到发布标签（`
 | `policy`（默认） | 1 | 2 | 0 + 警告 | 4 |
 | `never` | 0 + 警告 | 0 + 警告 | 0 + 警告 | 4 |
 
+即使是 `fail-on: policy`，exit 3 也会变为 0，这是有意为之：VulnIntel 故障不会阻断您的构建或部署（fail-open），缺少判定这一事实仍会以警告和 `verdict` 输出（`service_error`）的形式保留。
+如需在无法连接 VulnIntel 时让 job 失败，请在下一步检查 `steps.<id>.outputs.verdict == 'service_error'`：
+
+```yaml
+- uses: vulnintel/scan-action@v1
+  id: vulnintel
+  with:
+    api-key: ${{ secrets.VULNINTEL_API_KEY }}
+- if: steps.vulnintel.outputs.verdict == 'service_error'
+  run: exit 1
+```
+
 ## 使用的端点
 
 所有请求都会发送 `X-Api-Key: <密钥>`、`User-Agent: vulnintel-scan-action/<版本>`。
@@ -138,6 +161,7 @@ URL 中的 `v1` 是移动标签。生产流水线中请固定到发布标签（`
 网络错误、5xx 推迟到下一周期，连续 5 次则 `exit 3`。`429` 时等待 `Retry-After`。`failed` 时打印 `error.code`、`error.message` 并 `exit 2`。
 判定使用的字段：`result.summary.{total_packages, total_vulnerabilities, kev_count, by_severity, unsupported_packages, unknown_vulnerabilities}`、
 `result.policy.{passed, violations[].{rule, count, samples}}`、`result.warnings[]`、`result.data_freshness.internal_db_synced_at`。
+升级建议使用的字段：`result.packages[].{purl, name, version, vulnerabilities[].{id, aliases, kev, severity, cvss.score, fixed_versions}}`。
 
 ### `GET /scan/jobs/{job_id}/sbom`
 

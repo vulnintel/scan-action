@@ -24,7 +24,7 @@ from time import monotonic, sleep
 from typing import Any
 from urllib.parse import urlparse
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 USER_AGENT = f"vulnintel-scan-action/{VERSION}"
 DEFAULT_API_URL = "https://api.vulnintelapp.com/api/v1"
 
@@ -39,6 +39,7 @@ POLL_INTERVAL = 3  # 서버 조회 리미터 60/60s 대비 20회/분
 MAX_POLL_FAILURES = 5
 REQUEST_TIMEOUT = 60
 DEFAULT_RETRY_AFTER = 10
+MAX_FIX_PACKAGES = 20  # 업그레이드 안내 줄 상한(로그 범람 방지)
 ID_RE = re.compile(r"^(CVE-\d{4}-\d{4,}|GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4})$")
 
 INPUTS = {
@@ -661,11 +662,96 @@ def unsupported_from_warnings(warnings: list[str]) -> int:
     )
 
 
-def judge(job: dict[str, Any], threshold: float, out: dict[str, str]) -> None:
+def violating_findings(
+    result: dict[str, Any], policy: str
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """보낸 정책의 fail 규칙을 서버 PolicyEvaluator 와 같은 규칙으로 다시 적용해
+    위반 (패키지, 취약점) 쌍을 돌려준다 — 서버 violations.samples 는 규칙당 5건뿐이다.
+    """
+    try:
+        rules = json.loads(policy).get("rules")
+    except (ValueError, AttributeError):
+        return []
+    rules = [r for r in rules if isinstance(r, dict)] if isinstance(rules, list) else []
+    ignore = {
+        i
+        for r in rules
+        if r.get("type") == "ignore_list"
+        for i in r.get("cve_ids") or []
+    }
+    vulns = [
+        (pkg, v)
+        for pkg in result.get("packages") or []
+        if isinstance(pkg, dict)
+        for v in pkg.get("vulnerabilities") or []
+        if isinstance(v, dict) and not {v.get("id"), *(v.get("aliases") or [])} & ignore
+    ]
+    hits: dict[tuple[Any, Any], tuple[dict[str, Any], dict[str, Any]]] = {}
+    for rule in rules:
+        kind, limit = rule.get("type"), rule.get("max_count") or 0
+        if rule.get("action", "fail") != "fail":
+            continue
+        if kind == "kev_present":
+            matches, limit = [x for x in vulns if x[1].get("kev")], 0
+        elif kind == "cvss_threshold":
+            low = rule.get("min_score") or 0.0
+            matches = [
+                x
+                for x in vulns
+                if isinstance(
+                    score := (x[1].get("cvss") or {}).get("score"), (int, float)
+                )
+                and score >= low
+            ]
+        elif kind == "severity_threshold":
+            matches = [x for x in vulns if x[1].get("severity") == rule.get("severity")]
+        else:
+            continue
+        if len(matches) > limit:
+            hits.update(((p.get("purl"), v.get("id")), (p, v)) for p, v in matches)
+    return list(hits.values())
+
+
+def _numeric_max(versions: list[str]) -> str | None:
+    """모두 점 구분 숫자면 숫자 튜플 기준 최댓값, 아니면 None(생태계 규칙은 구현하지 않는다)."""
+    if not versions or not all(re.fullmatch(r"\d+(\.\d+)*", v) for v in versions):
+        return None
+    return max(versions, key=lambda v: tuple(int(n) for n in v.split(".")))
+
+
+def fix_lines(findings: list[tuple[dict[str, Any], dict[str, Any]]]) -> list[str]:
+    """위반 취약점을 패키지별로 묶어 `이름 버전 → 올릴 버전 (ID...)` 한 줄씩 만든다."""
+    groups: dict[Any, tuple[dict[str, Any], dict[str, list[str]]]] = {}
+    for pkg, v in findings:
+        fixed = [str(f) for f in v.get("fixed_versions") or []]
+        key = pkg.get("purl") or (pkg.get("name"), pkg.get("version"))
+        groups.setdefault(key, (pkg, {}))[1][str(v.get("id"))] = fixed
+    lines = []
+    for pkg, by_id in list(groups.values())[:MAX_FIX_PACKAGES]:
+        fixed_ids = sorted(i for i, f in by_id.items() if f)
+        unfixed = sorted(i for i, f in by_id.items() if not f)
+        best = _numeric_max([f for i in fixed_ids for f in by_id[i]])
+        if best:
+            parts = [f"upgrade to >= {best} ({', '.join(fixed_ids)})"]
+        else:
+            parts = [f"{i} fixed in {' / '.join(by_id[i])}" for i in fixed_ids]
+        if unfixed:
+            parts.append(f"no fixed version yet ({', '.join(unfixed)})")
+        version = pkg.get("version") or "(version unknown)"
+        lines.append(f"  {pkg.get('name')} {version} → {'; '.join(parts)}")
+    if len(groups) > MAX_FIX_PACKAGES:
+        lines.append(f"  ... and {len(groups) - MAX_FIX_PACKAGES} more package(s)")
+    return ["Fix by upgrading:", *lines] if lines else []
+
+
+def judge(
+    job: dict[str, Any], threshold: float, out: dict[str, str], sent_policy: str = ""
+) -> None:
     """결과를 출력하고 판정한다 — 커버리지·미확정 게이트를 policy.passed 보다 먼저 본다.
 
     순서: total 0 → 커버리지 → 미확정(unknown_vulnerabilities) → policy.passed.
     판정 불가(2)가 정책 위반(1)보다 앞서지만, 위반 내역은 그 전에 전부 출력한다.
+    sent_policy(업로드한 정책 JSON)가 있으면 위반 패키지별 업그레이드 안내도 출력한다.
     """
     if job.get("status") == "failed":
         err = job.get("error") or {}
@@ -731,6 +817,9 @@ def judge(job: dict[str, Any], threshold: float, out: dict[str, str]) -> None:
             f"  - rule={v.get('rule')} count={v.get('count')} "
             f"samples={', '.join(v.get('samples') or [])}"
         )
+    if passed is not True:
+        for line in fix_lines(violating_findings(result, sent_policy)):
+            say(line)
 
     if total == 0:
         raise Exit(
@@ -828,7 +917,7 @@ def run(cfg: dict[str, str], out: dict[str, str]) -> None:
     job = wait_for_result(base, api_key, job_id, deadline)
     if cfg["sbom-output"] and job.get("status") == "completed":
         save_sbom(base, api_key, job_id, cfg["sbom-output"], deadline)
-    judge(job, threshold, out)
+    judge(job, threshold, out, policy)
 
 
 def _append(env: str, text: str) -> None:
