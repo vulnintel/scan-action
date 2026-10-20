@@ -1,16 +1,18 @@
-# VulnIntel CI 클라이언트 (v1)
+# VulnIntel CI Client (v1)
 
-이미 있는 lockfile 또는 SBOM을 VulnIntel 서버에 올려 판정을 받고, 그 판정을 CI exit code로 바꾸는 얇은 클라이언트다.
-GitHub Action(`action.yml`, composite) 1개와 그 안에서 도는 `vulnintel_scan.py` 1개로 구성된다.
+**English** | [한국어](README.ko.md) | [简体中文](README.zh-CN.md)
 
-> **컨테이너 이미지는 지원하지 않는다. 애플리케이션 의존성 전용이다.**
-> VulnIntel은 deb/rpm/apk advisory를 수집하지 않는다. `syft <image>`로 만든 SBOM을 올리면 대부분의 컴포넌트가
-> 평가 불가 생태계로 분류되고, 클라이언트는 PASS 대신 `exit 2`(판정 불가)를 낸다. 소스 트리(`syft dir:.`)나 lockfile을 올린다.
+A thin client that uploads an existing lockfile or SBOM to the VulnIntel server, receives a verdict, and turns that verdict into a CI exit code.
+It consists of one GitHub Action (`action.yml`, composite) and one `vulnintel_scan.py` that runs inside it.
 
-- 스크립트는 Python 3 표준 라이브러리만 쓴다(pip·jq 불필요). GitLab CI·Jenkins에서도 `python3 vulnintel_scan.py`로 단독 실행된다.
-- 실행 1회에 파일 1개만 올린다. 여러 lockfile은 matrix로 스텝을 나눠 돌린다.
+> **Container images are not supported. Application dependencies only.**
+> VulnIntel does not collect deb/rpm/apk advisories. If you upload an SBOM generated with `syft <image>`, most components
+> are classified as unsupported ecosystems, and the client returns `exit 2` (indeterminate) instead of PASS. Upload a source tree (`syft dir:.`) or a lockfile.
 
-## 사용 예
+- The script uses only the Python 3 standard library (no pip or jq required). It also runs standalone on GitLab CI and Jenkins via `python3 vulnintel_scan.py`.
+- Each run uploads exactly one file. For multiple lockfiles, split them into separate steps with a matrix.
+
+## Usage
 
 GitHub Actions:
 
@@ -23,142 +25,142 @@ GitHub Actions:
     max-cvss: 9.0
 ```
 
-GitLab CI / Jenkins (입력은 CLI 인자 또는 `INPUT_*` 환경변수, 인자가 우선):
+GitLab CI / Jenkins (inputs are CLI arguments or `INPUT_*` environment variables; arguments take precedence):
 
 ```bash
 curl -fsSLo vulnintel_scan.py https://raw.githubusercontent.com/vulnintel/scan-action/v1/vulnintel_scan.py
-export INPUT_API_KEY="$VULNINTEL_API_KEY"     # 키는 인자보다 환경변수로 넘긴다(프로세스 목록 노출 방지)
+export INPUT_API_KEY="$VULNINTEL_API_KEY"     # Pass the key as an environment variable, not an argument (avoids exposure in the process list)
 python3 vulnintel_scan.py --file package-lock.json --max-high 5
 ```
 
-URL의 `v1`은 움직이는 태그다. 운영 파이프라인에서는 릴리스 태그(`v1.0.0`)나 커밋 SHA로 고정한다.
+`v1` in the URL is a moving tag. In production pipelines, pin to a release tag (`v1.0.0`) or a commit SHA.
 
-환경변수 이름은 입력 키를 대문자로 바꾸고 `-`를 `_`로 바꾼 것이다(`max-cvss` → `INPUT_MAX_CVSS`).
-값이 빈 문자열인 환경변수/인자는 "빈값"으로 취급한다(예: `--max-cvss ""`는 CVSS 규칙을 만들지 않는다).
+Environment variable names are the input key in uppercase with `-` replaced by `_` (`max-cvss` → `INPUT_MAX_CVSS`).
+An environment variable or argument whose value is an empty string is treated as "empty" (e.g., `--max-cvss ""` creates no CVSS rule).
 
-## 입력
+## Inputs
 
-| 키 | 기본값 | 의미 |
+| Key | Default | Description |
 |---|---|---|
-| `api-key` | 필수 | `X-Api-Key` 헤더. 없으면 `exit 4`. |
-| `api-url` | `https://api.vulnintelapp.com/api/v1` | 베이스 URL. `https://`만 허용(로컬호스트만 `http://` 허용). 리다이렉트는 따르지 않는다. |
-| `path` | `.` | 자동탐색 루트. **직하위만** 본다(하위 디렉터리 재귀 없음). |
-| `file` | 빈값 | 지정 시 자동탐색·syft를 건너뛰고 이 파일만 올린다. |
-| `syft` | `auto` | `auto`: PATH에 syft가 있으면 `syft dir:<path> -o cyclonedx-json` 결과를 올린다(실패 시 경고 후 lockfile 탐색). `off`: lockfile 탐색만. |
+| `api-key` | Required | `X-Api-Key` header. If missing, `exit 4`. |
+| `api-url` | `https://api.vulnintelapp.com/api/v1` | Base URL. Only `https://` is allowed (`http://` only for localhost). Redirects are not followed. |
+| `path` | `.` | Auto-discovery root. Checks **top level only** (no recursion into subdirectories). |
+| `file` | empty | If set, skips auto-discovery and syft and uploads only this file. |
+| `syft` | `auto` | `auto`: if syft is on PATH, uploads the output of `syft dir:<path> -o cyclonedx-json` (on failure, warns and falls back to lockfile discovery). `off`: lockfile discovery only. |
 | `scan-depth` | `basic` | `basic` / `precise`. |
-| `fail-on` | `policy` | `policy` / `never`. 아래 억제 매핑. |
+| `fail-on` | `policy` | `policy` / `never`. See the suppression mapping below. |
 | `fail-on-kev` | `true` | `{type: kev_present, action: fail}` |
-| `max-cvss` | `9.0` | `{type: cvss_threshold, min_score: <값>, max_count: 0, action: fail}`. 빈값이면 규칙 없음. CVSS가 없는 취약점은 이 규칙에 걸리지 않는다. |
-| `max-critical` | `0` | `{type: severity_threshold, severity: CRITICAL, max_count: <값>, action: fail}`. CVSS 없는 CRITICAL을 막는다. 빈값이면 규칙 없음. |
-| `max-high` | 빈값 | 위와 같음, `HIGH`. |
-| `max-unknown` | 빈값 | 위와 같음, `UNKNOWN`(심각도 미상). 아래 "미확정 판정"(영향 여부 미상)과 다른 개념이다. |
-| `ignore` | 빈값 | 콤마/공백/개행 구분 `CVE-YYYY-NNNN`·`GHSA-xxxx-xxxx-xxxx` → `{type: ignore_list, cve_ids: [...]}`. 형식 위반·500개 초과는 전송 전에 `exit 4`. |
-| `policy-json` | 빈값 | 정책 JSON을 그대로 전송. 설정 시 위 정책 키 전부 무시(경고 1줄). |
-| `unsupported-ratio-threshold` | `0.20` | 커버리지 게이트. 초과 시 `exit 2`. `1.0`이면 사실상 비활성. |
-| `no-cache` | `false` | 서버 24h 결과 캐시 우회 요청. |
-| `timeout` | `360` | 업로드~판정 총 대기(초). 310 미만은 310으로 올리고 경고(서버 job 하드 타임아웃 300초). |
-| `sbom-output` | 빈값 | 지정 시 job의 CycloneDX SBOM을 이 경로에 저장. 실패해도 판정은 바뀌지 않는다. |
+| `max-cvss` | `9.0` | `{type: cvss_threshold, min_score: <value>, max_count: 0, action: fail}`. Empty means no rule. Vulnerabilities without a CVSS score are not caught by this rule. |
+| `max-critical` | `0` | `{type: severity_threshold, severity: CRITICAL, max_count: <value>, action: fail}`. Catches CRITICAL findings without a CVSS score. Empty means no rule. |
+| `max-high` | empty | Same as above, for `HIGH`. |
+| `max-unknown` | empty | Same as above, for `UNKNOWN` (severity unknown). Not the same as "unresolved" (impact unknown) described below. |
+| `ignore` | empty | `CVE-YYYY-NNNN` / `GHSA-xxxx-xxxx-xxxx` separated by commas, spaces, or newlines → `{type: ignore_list, cve_ids: [...]}`. Invalid format or more than 500 entries → `exit 4` before sending. |
+| `policy-json` | empty | Sends the policy JSON as is. When set, all policy keys above are ignored (one-line warning). |
+| `unsupported-ratio-threshold` | `0.20` | Coverage gate. If exceeded, `exit 2`. `1.0` effectively disables it. |
+| `no-cache` | `false` | Requests a bypass of the server's 24h result cache. |
+| `timeout` | `360` | Total wait from upload to verdict (seconds). Values below 310 are raised to 310 with a warning (server job hard timeout is 300 seconds). |
+| `sbom-output` | empty | If set, saves the job's CycloneDX SBOM to this path. Failure here does not change the verdict. |
 
-정책 키를 전부 끄면(`fail-on-kev: false`, `max-cvss`·`max-critical` 빈값 등) 클라이언트는 실패하지 않는 `warn` 규칙 1개를 보낸다.
-서버는 규칙이 빈 정책을 받으면 기본 정책(KEV·CVSS 9+ 실패)을 적용하기 때문이다.
+If you turn off all policy keys (`fail-on-kev: false`, `max-cvss` and `max-critical` empty, etc.), the client sends a single non-failing `warn` rule.
+This is because the server applies its default policy (fail on KEV or CVSS 9+) when it receives a policy with no rules.
 
-자동탐색 대상(서버 파서가 읽는 파일): `package-lock.json`, `go.sum`, `requirements.txt`, `Cargo.lock`, `Gemfile.lock`,
-`composer.lock`, `packages.lock.json`, CycloneDX/SPDX JSON. 후보가 0개 또는 2개 이상이면 `exit 4`.
-`pnpm-lock.yaml`·`yarn.lock`·`poetry.lock`·`uv.lock`·`Pipfile.lock`·`pom.xml`·`build.gradle`은 파서가 없어 후보에서 빠진다(syft 사용 시 커버됨).
+Auto-discovery targets (files the server parsers read): `package-lock.json`, `go.sum`, `requirements.txt`, `Cargo.lock`, `Gemfile.lock`,
+`composer.lock`, `packages.lock.json`, CycloneDX/SPDX JSON. If there are zero candidates or two or more, `exit 4`.
+`pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `pom.xml`, and `build.gradle` have no parser and are excluded from candidates (covered when using syft).
 
-## 출력
+## Outputs
 
-| 출력 | 내용 |
+| Output | Content |
 |---|---|
-| `job-id` | 스캔 job UUID |
-| `passed` | `result.policy.passed` 원값(`true`/`false`) |
-| `verdict` | `pass` / `policy_failed` / `indeterminate` / `service_error` / `usage_error` — `fail-on` 억제 전 판정 |
-| `total-packages` / `total-vulnerabilities` / `kev-count` | `result.summary` 값 |
-| `unsupported-ratio` | 평가 불가 패키지 비율(소수 3자리) |
+| `job-id` | Scan job UUID |
+| `passed` | Raw value of `result.policy.passed` (`true`/`false`) |
+| `verdict` | `pass` / `policy_failed` / `indeterminate` / `service_error` / `usage_error` — the verdict before `fail-on` suppression |
+| `total-packages` / `total-vulnerabilities` / `kev-count` | Values from `result.summary` |
+| `unsupported-ratio` | Ratio of unsupported packages (3 decimal places) |
 | `data-freshness` | `result.data_freshness.internal_db_synced_at` |
 
-출력은 `$GITHUB_OUTPUT`이 있을 때만 기록한다. 콘솔에는 DB 동기 시각, 캐시 적중 여부, 심각도별 건수(`UNKNOWN` 포함), 미확정 취약점 수,
-`warnings` 전문, 위반 규칙별 `rule`·`count`·`samples`를 출력하고, `$GITHUB_STEP_SUMMARY`가 있으면 같은 내용을 1회 append한다.
+Outputs are written only when `$GITHUB_OUTPUT` exists. The console shows the DB sync time, cache hit status, counts by severity (including `UNKNOWN`), the number of unresolved vulnerabilities,
+the full `warnings`, and `rule` / `count` / `samples` for each violated rule. If `$GITHUB_STEP_SUMMARY` exists, the same content is appended to it once.
 
-## exit code
+## Exit codes
 
-| code | 의미 | 조건 |
+| code | Meaning | Condition |
 |---|---|---|
-| 0 | PASS | 커버리지 게이트 통과 **그리고** 미확정 0 **그리고** `policy.passed == true` |
-| 1 | 정책 위반 | `policy.passed == false` (미확정 0일 때) |
-| 2 | 판정 불가 | 커버리지 미달 · `total_packages == 0` · 미확정 취약점 1건 이상(`summary.unknown_vulnerabilities > 0`, 확정 위반과 섞여도 2) · job `failed` · 업로드 거부 400/413/422 · 429 `upload_budget_exceeded` · 402 `monthly_quota_exceeded` · 10MB 초과 입력 |
-| 3 | 서비스 도달 실패 | 네트워크 실패 · 5xx(업로드 4회 재시도 후, 폴링 연속 5회 실패) · 429 재시도가 총 timeout을 넘김 · 총 timeout 초과 |
-| 4 | 사용법 오류 | `api-key` 없음 · 401 · 입력 파일 없음 · 자동탐색 0개/다중 · 입력값 형식 위반 · `api-url` 오류(3xx/404) |
+| 0 | PASS | Coverage gate passed **and** 0 unresolved **and** `policy.passed == true` |
+| 1 | Policy violation | `policy.passed == false` (when 0 unresolved) |
+| 2 | Indeterminate | Coverage below threshold · `total_packages == 0` · 1 or more unresolved vulnerabilities (`summary.unknown_vulnerabilities > 0`; still 2 even when mixed with confirmed violations) · job `failed` · upload rejected with 400/413/422 · 429 `upload_budget_exceeded` · 402 `monthly_quota_exceeded` · input over 10MB |
+| 3 | Service unreachable | Network failure · 5xx (after 4 upload retries, or 5 consecutive polling failures) · 429 retries exceed the total timeout · total timeout exceeded |
+| 4 | Usage error | Missing `api-key` · 401 · input file not found · auto-discovery found 0 or multiple files · invalid input format · `api-url` error (3xx/404) |
 
-평가 순서는 `total_packages == 0` → 커버리지 게이트 → 미확정 게이트 → `policy.passed`다. 앞 단계에서 2가 나도
-콘솔·STEP_SUMMARY에는 그 전에 정책 위반 내역(`rule`·`count`·`samples`)을 전부 출력하므로 확정 위반이 가려지지 않는다.
-`unsupported_ratio = unsupported / total_packages`이며 `unsupported`는 `result.summary.unsupported_packages`를 우선 쓰고,
-값이 없으면(구 캐시 결과) `warnings`의 `unsupported_ecosystem: eco(N), eco2(M)`에서 N을 합산한다. `missing_version`은 세지 않는다
-(버전 미상 패키지는 서버가 이름이 같은 취약점을 전부 정책 평가에 넣으므로 PASS를 오염시키지 않는다. SBOM의 버전 없는 항목도 같은 경로다.
-생태계를 알 수 없는 이름만 있는 항목은 `unsupported`로 집계된다).
+Evaluation order is `total_packages == 0` → coverage gate → unresolved gate → `policy.passed`. Even if an earlier stage returns 2,
+all policy violations (`rule` / `count` / `samples`) are printed to the console and STEP_SUMMARY first, so confirmed violations are never hidden.
+`unsupported_ratio = unsupported / total_packages`. `unsupported` uses `result.summary.unsupported_packages` first;
+if that value is missing (older cached result), it sums N from `unsupported_ecosystem: eco(N), eco2(M)` in `warnings`. `missing_version` is not counted
+(for packages with an unknown version, the server includes every vulnerability with a matching name in policy evaluation, so they cannot taint a PASS. Versionless entries in an SBOM take the same path.
+Name-only entries whose ecosystem cannot be determined are counted as `unsupported`).
 
-**미확정 게이트**: `result.summary.unknown_vulnerabilities`는 버전이 있는데 범위 비교가 안 돼 영향 여부를 확정하지 못한 취약점 수다
-(정책이 평가하지 못한 것, `ignore`·VEX로 억제한 건 제외). 0보다 크면 `policy.passed`와 무관하게 `exit 2`.
-검토 후 `ignore`에 넣으면 풀린다. 필드가 없는(구 캐시) 결과는 이 게이트를 건너뛴다.
+**Unresolved gate**: `result.summary.unknown_vulnerabilities` is the number of vulnerabilities where a version is present but range comparison failed, so impact could not be determined
+(ones the policy could not evaluate, excluding those suppressed by `ignore` or VEX). If greater than 0, `exit 2` regardless of `policy.passed`.
+After review, adding them to `ignore` clears the gate. Results without this field (older cache) skip this gate.
 
-`fail-on` 억제 매핑 (`verdict` 출력은 억제 전 값을 유지한다):
+`fail-on` suppression mapping (the `verdict` output keeps the pre-suppression value):
 
 | `fail-on` | 1 | 2 | 3 | 4 |
 |---|---|---|---|---|
-| `policy` (기본) | 1 | 2 | 0 + 경고 | 4 |
-| `never` | 0 + 경고 | 0 + 경고 | 0 + 경고 | 4 |
+| `policy` (default) | 1 | 2 | 0 + warning | 4 |
+| `never` | 0 + warning | 0 + warning | 0 + warning | 4 |
 
-## 사용하는 엔드포인트
+## Endpoints used
 
-모든 요청에 `X-Api-Key: <키>`, `User-Agent: vulnintel-scan-action/<버전>`을 보낸다.
-서버 에러 바디는 `{"error": <detail>, "message": <detail>, "request_id": ...}`이고 `<detail>`은 문자열 또는 `{error: <코드>, ...}` 객체다
-(예: `{"error": {"error": "upload_budget_exceeded", "retry_after_seconds": 3600}, ...}`). 클라이언트는 이 형식과 최상위 `detail`(422·구 형식)을
-모두 처리하고, 파싱이 안 되면 원문을 출력한다.
+Every request sends `X-Api-Key: <key>` and `User-Agent: vulnintel-scan-action/<version>`.
+The server error body is `{"error": <detail>, "message": <detail>, "request_id": ...}`, where `<detail>` is a string or a `{error: <code>, ...}` object
+(e.g., `{"error": {"error": "upload_budget_exceeded", "retry_after_seconds": 3600}, ...}`). The client handles both this format and a top-level `detail` (422 / legacy format),
+and prints the raw body if parsing fails.
 
 ### `POST /scan/jobs`
 
-`multipart/form-data`: `file`(필수), `kind`(`sbom`|`lockfile`, CycloneDX/SPDX JSON이면 `sbom`), `policy`(JSON 문자열), `scan_depth`, `no_cache`.
+`multipart/form-data`: `file` (required), `kind` (`sbom`|`lockfile`; `sbom` for CycloneDX/SPDX JSON), `policy` (JSON string), `scan_depth`, `no_cache`.
 
-| 응답 | 클라이언트 동작 |
+| Response | Client behavior |
 |---|---|
-| `202 {job_id, status, status_url}` | `status == "completed"`면 캐시 적중 — 폴링 없이 결과 1회 조회 |
-| 네트워크 오류 · 5xx | 1→2→4→8초 백오프로 최대 4회 재시도, 소진 시 `exit 3` |
-| `429` `rate_limit_exceeded` · `active_job_limit_exceeded` | `Retry-After`(없으면 `detail.retry_after_seconds`)만큼 대기 후 재시도, 총 timeout 내 |
-| `429` `upload_budget_exceeded` | 재시도 없이 `exit 2` |
-| `402` `monthly_quota_exceeded` | 재시도·대기 없이 `exit 2`, `plan`·`limit`·`used`·`reset_at`·`upgrade_url` 출력 |
-| `400` | `exit 2`, 전송한 정책 JSON 전문을 출력 |
-| `413` · `422` · 기타 4xx | `exit 2` |
-| `401` · `404` · `405` · 3xx | `exit 4` (키 또는 `api-url` 확인) |
+| `202 {job_id, status, status_url}` | If `status == "completed"`, it is a cache hit — fetches the result once without polling |
+| Network error · 5xx | Retries up to 4 times with 1→2→4→8 second backoff; `exit 3` when exhausted |
+| `429` `rate_limit_exceeded` · `active_job_limit_exceeded` | Waits for `Retry-After` (or `detail.retry_after_seconds` if absent), then retries, within the total timeout |
+| `429` `upload_budget_exceeded` | `exit 2` without retry |
+| `402` `monthly_quota_exceeded` | `exit 2` without retry or wait; prints `plan` / `limit` / `used` / `reset_at` / `upgrade_url` |
+| `400` | `exit 2`; prints the full policy JSON that was sent |
+| `413` · `422` · other 4xx | `exit 2` |
+| `401` · `404` · `405` · 3xx | `exit 4` (check the key or `api-url`) |
 
 ### `GET /scan/jobs/{job_id}`
 
-3초 간격으로 폴링한다. `status`가 `completed`/`failed`가 되면 종료.
-네트워크 오류·5xx는 다음 주기로 넘기고 연속 5회면 `exit 3`. `429`는 `Retry-After`만큼 대기. `failed`면 `error.code`·`error.message`를 출력하고 `exit 2`.
-판정에 쓰는 필드: `result.summary.{total_packages, total_vulnerabilities, kev_count, by_severity, unsupported_packages, unknown_vulnerabilities}`,
+Polls every 3 seconds. Stops when `status` becomes `completed`/`failed`.
+Network errors and 5xx are deferred to the next cycle; 5 in a row → `exit 3`. On `429`, waits for `Retry-After`. On `failed`, prints `error.code` and `error.message` and returns `exit 2`.
+Fields used for the verdict: `result.summary.{total_packages, total_vulnerabilities, kev_count, by_severity, unsupported_packages, unknown_vulnerabilities}`,
 `result.policy.{passed, violations[].{rule, count, samples}}`, `result.warnings[]`, `result.data_freshness.internal_db_synced_at`.
 
 ### `GET /scan/jobs/{job_id}/sbom`
 
-`sbom-output` 지정 시 1회 호출해 CycloneDX JSON을 저장한다.
+When `sbom-output` is set, called once to save the CycloneDX JSON.
 
-## 보안
+## Security
 
-- **버전 고정**: `@v1`은 새 릴리스를 따라 움직인다. 공급망 위험을 줄이려면 커밋 SHA로 고정한다.
+- **Version pinning**: `@v1` moves with new releases. To reduce supply chain risk, pin to a commit SHA.
   ```yaml
-  - uses: vulnintel/scan-action@<40자리 커밋 SHA>  # v1.0.0
+  - uses: vulnintel/scan-action@<40-char commit SHA>  # v1.0.0
   ```
-- **API 키**: `secrets.VULNINTEL_API_KEY` 같은 GitHub Secrets로만 넘긴다. 워크플로 파일에 평문으로 쓰지 않는다.
-  클라이언트는 GitHub Actions에서 키에 `::add-mask::`를 적용하고, 다른 CI에서도 출력 속 키를 `***`로 가린다.
-- **보내는 데이터**: 선택된 lockfile 또는 SBOM 파일 1개의 내용(syft 사용 시 syft가 만든 SBOM)과 정책 설정만 보낸다.
-  소스 코드는 보내지 않는다.
-- **전송**: `https://`만 쓰고(로컬호스트 제외) TLS 인증서를 검증하며, 리다이렉트를 따르지 않는다(키가 다른 호스트로 새지 않게).
-- **출력 처리**: 서버·lockfile에서 온 문자열은 `::stop-commands::` 구간 안에서 출력해 워크플로 명령으로 실행되지 않게 한다.
-- 취약점 제보는 [SECURITY.md](SECURITY.md)를 따른다.
+- **API key**: Pass it only through GitHub Secrets, such as `secrets.VULNINTEL_API_KEY`. Never write it in plain text in a workflow file.
+  On GitHub Actions the client applies `::add-mask::` to the key, and on other CI systems it also masks the key as `***` in output.
+- **Data sent**: Only the contents of the one selected lockfile or SBOM file (the syft-generated SBOM when using syft) and the policy settings.
+  Source code is not sent.
+- **Transport**: Uses `https://` only (except localhost), verifies TLS certificates, and does not follow redirects (so the key cannot leak to another host).
+- **Output handling**: Strings from the server or lockfile are printed inside a `::stop-commands::` block so they are not executed as workflow commands.
+- To report a vulnerability, follow [SECURITY.md](SECURITY.md).
 
-## 테스트
+## Tests
 
 ```bash
 python3 -m pip install pytest && python3 -m pytest tests -q
 ```
 
-가짜 서버(`http.server`)를 띄워 실제 HTTP 경로로 검증한다. 테스트만 pytest를 쓰고 스크립트 본체는 표준 라이브러리만 쓴다.
+Tests spin up a fake server (`http.server`) and verify behavior over real HTTP paths. Only the tests use pytest; the script itself uses only the standard library.
